@@ -1,0 +1,154 @@
+---
+title: "Exercise 3 pt 2"
+output: html_notebook
+---
+```{r, echo = F}
+library(tidyverse)
+library(skimr)
+library(kernlab)
+library(ipred)
+library(ggpubr)
+library(tidymodels)
+library(assertr)
+library(xgboost) ## For the xgboost model
+library(vip) ## For variable importance plots
+library(ranger) ## For random forest
+library(Lahman) ## For the heart data
+
+set.seed(42)
+rm(list = ls(all.names = TRUE))
+```
+
+
+```{r}
+heart.df = read.csv("/Users/wesleyshen/Downloads/heart_disease_health_indicators_BRFSS2015.csv")
+head(heart.df)
+skim(heart.df)
+```
+
+```{r}
+ggplot(heart.df, aes(x=HeartDiseaseorAttack)) + geom_histogram(stat="count") + theme_minimal()
+
+```
+```{r}
+inTrain = initial_split(data = heart.df, prop = 0.8)
+heart.train = inTrain %>%  training()
+heart.test = inTrain %>%  testing()
+```
+
+
+
+```{r}
+heart.df %>% select(HeartDiseaseorAttack) %>%table() %>%  prop.table()
+heart.train %>% select(HeartDiseaseorAttack) %>%table()%>%  prop.table()
+heart.test %>% select(HeartDiseaseorAttack) %>%table()%>%  prop.table()
+```
+```{r}
+heart.Recipe = recipe(HeartDiseaseorAttack ~ . , heart.train)  # what are we predicting, and what are we using to predict?
+
+  
+  
+heart.RecipeSteps = heart.Recipe %>% 
+  step_center(all_predictors()) %>% # subtract mean from all points
+  step_scale(all_predictors()) # subtract std dev from all points
+
+heart.RecipePrep = prep(heart.RecipeSteps, heart.train) # learn means and std
+
+#create new dataframes
+heart.train.sc = bake(heart.RecipePrep, heart.train)
+heart.test.sc = bake (heart.RecipePrep, heart.test)
+
+
+head(heart.train.sc)
+```
+```{r}
+glm.mod = logistic_reg(mode = "classification", engine = "glm")
+
+glm.workflow = workflow() %>% 
+  add_model(glm.mod) %>% 
+  add_recipe(heart.Recipe)
+
+heart.train.sc$HeartDiseaseorAttack <- factor(heart.train.sc$HeartDiseaseorAttack)
+heart.test.sc$HeartDiseaseorAttack <- factor(heart.test.sc$HeartDiseaseorAttack)
+
+
+glm.fit = glm.workflow %>%  
+  fit(data = heart.train.sc)
+
+glm.fit
+
+```
+```{r}
+
+glm.pred <- glm.fit %>% 
+  predict(heart.test.sc) %>% 
+  bind_cols(select(heart.test.sc, HeartDiseaseorAttack))
+
+conf_mat(glm.pred, truth = HeartDiseaseorAttack, estimate = .pred_class)
+
+```
+```{r}
+glm.pred.roc = glm.fit %>% 
+  predict(heart.test.sc, type = "prob") %>% 
+  bind_cols(select(heart.test.sc, HeartDiseaseorAttack))
+
+glm.roc.df = roc_curve(data = glm.pred.roc, truth = HeartDiseaseorAttack,.pred_0)
+
+ggplot(data = glm.roc.df, aes(x=1-specificity, y = sensitivity)) + geom_path() + 
+  geom_abline(lty=3)+
+  coord_equal()+
+  theme_bw() + 
+  xlab("True Positive Rate") +
+  ylab("False Positive Rate")
+
+```
+```{r}
+cv_folds = vfold_cv(heart.train.sc, v=5, repeats = 2)
+
+tune_spec_rf = rand_forest(mtry = tune(), min_n = tune(), mode = "classification", engine = "ranger")
+#mtry, min_n are hyper parameters in random forest 
+
+rfTune <- workflow() %>% 
+  add_model(tune_spec_rf) %>% 
+  add_recipe(heart.Recipe) %>% 
+  tune_grid(resamples = cv_folds, grid = 6,
+  control = control_grid(allow_par = TRUE, verbose = FALSE))
+#tell R how to do hyperparameter tuning/optimization
+
+autoplot(rfTune)
+```
+```{r}
+tuned.parameters.rf = rfTune %>%  select_best("roc_auc") %>% select(-.config)
+
+rf.mod = rand_forest(mode = "classification") %>% 
+  update(parameters = tuned.parameters.rf) %>% 
+  set_engine("ranger")
+
+rf.workflow = workflow() %>% 
+  add_model(rf.mod) %>% 
+  add_recipe(heart.Recipe)
+
+rf.fit = rf.workflow %>% 
+  fit(data = heart.train.sc)
+```
+
+
+```{r}
+rf.pred = rf.fit %>%  predict(heart.test.sc) %>%   bind_cols(heart.test.sc %>%  select(HeartDiseaseorAttack))
+
+rf.pred %>%  conf_mat(truth = HeartDiseaseorAttack, estimate = .pred_class)
+```
+
+```{r}
+rf.pred.roc = rf.fit %>% predict(heart.test.sc, type = "prob") %>%  bind_cols(heart.test.sc %>% select(HeartDiseaseorAttack))
+                                 
+rf.roc.plot = roc_curve(data = rf.pred.roc, truth = HeartDiseaseorAttack, .pred_0) %>% 
+  ggplot(aes(x=1-specificity, y = sensitivity)) + geom_path() + 
+  geom_abline(lty=3)+
+  coord_equal()+
+  theme_bw() + 
+  xlab("False Positive Rate") +
+  ylab("True Positive Rate")
+
+rf.roc.plot
+```
